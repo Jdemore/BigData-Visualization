@@ -3,6 +3,7 @@
 import json
 from unittest.mock import patch
 
+from lava.llm import history
 from lava.llm.pipeline import _vizspec_cache, nl_to_vizspec
 from lava.llm.schema import VizSpec
 
@@ -32,14 +33,34 @@ VALID_RESPONSE = {
 class TestPipeline:
     def setup_method(self):
         _vizspec_cache.clear()
+        history.clear()
 
     @patch("lava.llm.pipeline.query_llm")
-    def test_cache_hit(self, mock_llm):
+    def test_cache_hit_no_history(self, mock_llm):
+        """Identical queries hit cache ONLY when no conversation history exists."""
         mock_llm.return_value = VALID_RESPONSE
         spec1 = nl_to_vizspec("show revenue by region", COLUMN_STATS)
-        spec2 = nl_to_vizspec("show revenue by region", COLUMN_STATS)
-        assert mock_llm.call_count == 2  # step1 refine + step2 generate; second query hits cache
-        assert spec1.intent == spec2.intent
+        history.clear()  # simulate fresh session
+        _vizspec_cache.clear()
+        mock_llm.reset_mock()
+        # First call: populates cache
+        nl_to_vizspec("show revenue by region", COLUMN_STATS)
+        first_count = mock_llm.call_count
+        # Clear history so the second call is eligible for cache hit
+        history.clear()
+        nl_to_vizspec("show revenue by region", COLUMN_STATS)
+        assert mock_llm.call_count == first_count  # second call hit cache
+        assert spec1.intent == "compare"
+
+    @patch("lava.llm.pipeline.query_llm")
+    def test_history_bypasses_cache(self, mock_llm):
+        """Follow-up queries always hit the LLM so context can be applied."""
+        mock_llm.return_value = VALID_RESPONSE
+        nl_to_vizspec("show revenue by region", COLUMN_STATS)
+        first_count = mock_llm.call_count
+        # Second identical query: history is non-empty, so cache is bypassed
+        nl_to_vizspec("show revenue by region", COLUMN_STATS)
+        assert mock_llm.call_count > first_count
 
     @patch("lava.llm.pipeline.query_llm")
     def test_retry_on_parse_error(self, mock_llm):

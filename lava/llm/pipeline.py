@@ -6,6 +6,7 @@ import time
 
 from lava.llm.client import query_llm
 from lava.llm.error_log import log_error, log_run
+from lava.llm.history import add_entry, build_history_block
 from lava.llm.parser import parse_llm_response
 from lava.llm.prompt import (
     REFINE_SYSTEM,
@@ -40,7 +41,9 @@ def _get_schema(column_stats: dict[str, dict]) -> dict[str, str]:
 def _refine_query(user_query: str, context: str) -> tuple[str, str, str | None, dict | None]:
     """Step 1: Refine raw NL into a precise analytical query.
     Returns (refined_query, notes, chart_type_hint, raw_response)."""
-    prompt = build_refine_prompt(user_query, context)
+    history_block = build_history_block()
+    full_context = f"{context}\n\n{history_block}" if history_block else context
+    prompt = build_refine_prompt(user_query, full_context)
     try:
         data = query_llm(prompt, system=REFINE_SYSTEM)
         refined = data.get("refined_query", user_query)
@@ -101,9 +104,13 @@ def nl_to_vizspec(
     column_stats: dict[str, dict],
     use_cache: bool = True,
 ) -> VizSpec:
-    """Full two-step pipeline: NL → refine → VizSpec, with logging."""
+    """Full two-step pipeline: NL → refine → VizSpec, with logging and history."""
+    # Cache bypass when there's conversation history — follow-ups need fresh LLM calls
+    from lava.llm.history import get_history
+    has_history = len(get_history()) > 0
+
     ck = _cache_key(user_query)
-    if use_cache and ck in _vizspec_cache:
+    if use_cache and not has_history and ck in _vizspec_cache:
         return _vizspec_cache[ck]
 
     t0 = time.perf_counter()
@@ -117,6 +124,9 @@ def nl_to_vizspec(
     spec, vizspec_raw = _generate_vizspec(
         user_query, refined_query, context, notes, schema, chart_hint
     )
+
+    # Track conversation history
+    add_entry(user_query, refined_query, spec)
 
     duration_ms = (time.perf_counter() - t0) * 1000
 
