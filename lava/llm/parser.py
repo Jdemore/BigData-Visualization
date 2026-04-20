@@ -1,4 +1,10 @@
-"""Parse and validate LLM output into VizSpec."""
+"""Translate raw LLM JSON into a validated VizSpec.
+
+This layer is deliberately defensive: the LLM occasionally hallucinates column
+names, emits dicts where strings are expected, or uses the wrong equality
+operator. Rather than surface those as hard errors, we fuzz-match column names,
+coerce types, and quietly drop filters with unrecognized ops. The raw response
+is logged upstream, so nothing is lost silently."""
 
 import difflib
 import re
@@ -14,7 +20,8 @@ from lava.llm.schema import (
 
 
 def _resolve_column(col: str, available: set[str]) -> str | None:
-    """Resolve a column name, auto-correcting near-misses."""
+    """Exact match first, then a difflib near-match at 0.7 ratio. The model occasionally
+    emits 'product_cat' for 'product_category' or similar -- fuzzy match rescues those."""
     if col in available:
         return col
     matches = difflib.get_close_matches(col, available, n=1, cutoff=0.7)
@@ -22,10 +29,11 @@ def _resolve_column(col: str, available: set[str]) -> str | None:
 
 
 def _validate_expression(expr: str | None, available: set[str]) -> str | None:
-    """Validate a SQL expression only uses known columns and safe operations."""
+    """Reject expressions that contain anything outside a safe grammar of column
+    names, numbers, arithmetic, and whitelisted SQL functions. Prevents a
+    hallucinating LLM from smuggling arbitrary SQL through the expression slot."""
     if not expr:
         return None
-    # Allow: column names, numbers, basic math ops, SQL functions
     safe_pattern = re.compile(
         r'^[\w\s\.\,\+\-\*\/\(\)\"\'0-9]+'
         r'(?:\s*(?:OVER|PARTITION|BY|ORDER|NULLIF|COALESCE|CAST|AS|SUM|AVG|COUNT|MIN|MAX)\s*[\(\)]?)*'
@@ -66,7 +74,7 @@ def _parse_axis(data: dict | None, available: set[str]) -> dict | None:
 
 
 def parse_llm_response(data: dict, schema: dict) -> VizSpec:
-    """Validate a parsed JSON dict from the LLM."""
+    """Build a VizSpec from raw LLM JSON. Defensive against malformed fields."""
     available = set(schema.keys())
 
     intent = data.get("intent", "explore")
@@ -77,11 +85,14 @@ def parse_llm_response(data: dict, schema: dict) -> VizSpec:
     y_axis = _parse_axis(data.get("y_axis"), available)
 
     if not x_axis:
+        # Missing x_axis would break every downstream caller. Fall back to the
+        # first column so the user at least sees a table instead of a stack trace.
         first_col = list(available)[0]
         x_axis = {"column": first_col, "aggregation": None, "time_bucket": None,
                    "expression": None, "label": None}
 
-    # Color by — LLM sometimes returns a dict or list instead of a string
+    # color_by has been observed as a string, a dict ({"column": "x"}), or a list.
+    # Normalize to a single column name regardless of shape.
     color_by = data.get("color_by")
     if isinstance(color_by, dict):
         color_by = color_by.get("column") or color_by.get("name")
@@ -95,14 +106,17 @@ def parse_llm_response(data: dict, schema: dict) -> VizSpec:
     filters: list[dict] = []
     for f in data.get("filters", []) or []:
         col = _resolve_column(f.get("column", ""), available)
-        if col and f.get("op") in VALID_OPS:
-            filters.append({"column": col, "op": f["op"], "value": f["value"]})
+        op = f.get("op")
+        # The LLM sometimes writes Python-style "==" instead of SQL "=".
+        if op == "==":
+            op = "="
+        if col and op in VALID_OPS:
+            filters.append({"column": col, "op": op, "value": f["value"]})
 
     chart = data.get("chart_type") or data.get("chart_suggestion", "table")
     if not isinstance(chart, str) or chart not in VALID_CHARTS:
         chart = _infer_chart(intent)
 
-    # Sanitize sort_by
     sort_by = data.get("sort_by")
     if isinstance(sort_by, dict):
         sort_col = sort_by.get("column")
@@ -111,7 +125,6 @@ def parse_llm_response(data: dict, schema: dict) -> VizSpec:
     else:
         sort_by = None
 
-    # Sanitize limit
     limit = data.get("limit")
     if not isinstance(limit, int):
         limit = None
@@ -130,7 +143,7 @@ def parse_llm_response(data: dict, schema: dict) -> VizSpec:
 
 
 def _infer_chart(intent: str) -> str:
-    """Fallback chart selection when LLM suggestion is invalid."""
+    """Pick a reasonable default chart when the LLM's suggestion is invalid or missing."""
     return {
         "trend": "line",
         "compare": "bar",

@@ -1,4 +1,5 @@
-"""Query cache — LRU with byte-budget eviction."""
+"""LRU cache for DataResult objects. Evicts on both entry count and total byte size
+so a single huge result cannot starve the rest of the cache."""
 
 import hashlib
 from collections import OrderedDict

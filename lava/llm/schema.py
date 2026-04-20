@@ -1,4 +1,9 @@
-"""VizSpec schema — the structured output contract between LLM and execution."""
+"""The VizSpec schema: the structured contract between the LLM and SQL generation.
+
+Two models live here on purpose. VizSpecSchema (pydantic) is the JSON shape we
+ask the LLM to produce. VizSpec (dataclass) is the internal runtime type that
+SQL gen and the renderer work against. Keeping them separate lets us validate
+LLM output aggressively without those checks leaking into the hot path."""
 
 from dataclasses import dataclass
 from typing import Optional
@@ -7,7 +12,7 @@ from pydantic import BaseModel
 
 
 class AxisSpec(BaseModel):
-    """Definition for a single axis."""
+    """One axis of a chart: which column, how to aggregate, how to bucket time."""
 
     column: str
     aggregation: Optional[str] = None  # sum, mean, count, min, max, median, std
@@ -17,7 +22,7 @@ class AxisSpec(BaseModel):
 
 
 class VizSpecSchema(BaseModel):
-    """Pydantic model for schema-enforced JSON output."""
+    """JSON shape requested from the LLM. Matches the schema documented in prompt.py."""
 
     intent: str
     x_axis: AxisSpec
@@ -32,7 +37,7 @@ class VizSpecSchema(BaseModel):
 
 @dataclass
 class VizSpec:
-    """Internal visualization specification. Validated and ready for SQL generation."""
+    """Post-validation spec consumed by sql_gen and the renderer. Always well-formed."""
 
     intent: str
     x_axis: dict
@@ -77,5 +82,5 @@ VALID_CHARTS = {
     "stacked_bar", "grouped_bar", "bubble", "bar_h", "density_heatmap", "strip",
 }
 VALID_AGGS = {"mean", "sum", "count", "min", "max", "median", "std"}
-VALID_OPS = {"==", "!=", ">", "<", ">=", "<=", "contains", "not_contains"}
+VALID_OPS = {"=", "==", "!=", ">", "<", ">=", "<=", "contains", "not_contains"}
 VALID_TIME_BUCKETS = {"day", "week", "month", "quarter", "year"}

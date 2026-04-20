@@ -1,4 +1,9 @@
-"""SQL-based data reduction for large datasets."""
+"""Server-side reduction of large result sets before they hit Plotly.
+
+The renderer bails out to this module whenever a query comes back with more
+than ~5K rows. Rather than shipping all those rows to the browser and letting
+the plotting library choke, we push a second query back into DuckDB to
+aggregate or downsample the data first."""
 
 import duckdb
 
@@ -7,7 +12,12 @@ from lava.llm.schema import VizSpec
 
 
 def reduce_data(spec: VizSpec, data_result: DataResult, con: duckdb.DuckDBPyConnection):
-    """Reduce a large DataResult to viz-ready pandas. Picks strategy by chart type."""
+    """Pick a reduction strategy based on the chart type and rerun the query.
+
+    Histograms get server-side binning, grouped bars/lines get GROUP BY
+    aggregation, plain lines get LTTB downsampling, everything else gets
+    reservoir sampling. Returns a pandas DataFrame small enough for Plotly.
+    """
     sql = data_result.sql
     chart = spec.chart_type
 
@@ -24,7 +34,8 @@ def reduce_data(spec: VizSpec, data_result: DataResult, con: duckdb.DuckDBPyConn
 
 
 def _bin_sql(source_sql: str, spec: VizSpec, n_bins: int = 100) -> str:
-    """Server-side histogram binning via DuckDB FLOOR-based bucketing."""
+    """Compute histogram bins in SQL rather than shipping raw values to the client.
+    Uses FLOOR((x - min) / width) bucketing -- stable, no dependencies."""
     col = spec.x_axis["column"]
     return f"""
         WITH bounds AS (
@@ -49,7 +60,7 @@ def _bin_sql(source_sql: str, spec: VizSpec, n_bins: int = 100) -> str:
 
 
 def _aggregate_sql(source_sql: str, spec: VizSpec) -> str:
-    """Group-by aggregation for bar/line charts."""
+    """Collapse rows by the x-axis column (and color_by if set) for bar/line charts."""
     group_parts = [f'"{spec.x_axis["column"]}"']
     if spec.color_by:
         group_parts.append(f'"{spec.color_by}"')
@@ -70,7 +81,10 @@ def _aggregate_sql(source_sql: str, spec: VizSpec) -> str:
 
 
 def _lttb_sql(source_sql: str, target: int = 5000) -> str:
-    """LTTB downsampling via DuckDB window functions."""
+    """Approximate LTTB (largest-triangle-three-buckets) downsampling for line
+    charts. Full LTTB would pick the point that maximizes triangle area per
+    bucket; this SQL approximation just takes one representative per bucket,
+    which is much cheaper and visually close for our use cases."""
     return f"""
         WITH numbered AS (
             SELECT *, row_number() OVER () AS __rn,

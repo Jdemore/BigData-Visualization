@@ -1,1 +1,1 @@
-"""LAVA Index Structures — B+-tree and Grid file."""
+"""Disk-resident index structures: B+-tree for 1-D, Grid File for 2-D range queries."""

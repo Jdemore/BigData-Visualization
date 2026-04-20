@@ -1,4 +1,10 @@
-"""Grid file index — multi-dimensional range queries with quantile-based splits."""
+"""Grid File: multi-dimensional range index with quantile-based splits.
+
+Unlike a B+-tree, the Grid File handles queries that constrain two or more
+numeric columns at once (e.g. lat/lon boxes, or scatter-plot brush selections).
+Splits are chosen from column quantiles so every bucket holds roughly
+target_bucket_size rows regardless of the underlying distribution.
+"""
 
 import os
 from dataclasses import dataclass, field
@@ -9,7 +15,7 @@ import numpy as np
 
 @dataclass
 class GridFile:
-    """Multi-dimensional grid file for range queries."""
+    """N-dimensional grid index. One bucket per (cell_0, cell_1, ...) tuple."""
 
     dimensions: list[str] = field(default_factory=list)
     scales: list[list[float]] = field(default_factory=list)
@@ -25,7 +31,12 @@ class GridFile:
         dims: list[str],
         target_bucket_size: int = 10000,
     ) -> None:
-        """Build grid file. Uses DuckDB for quantile computation."""
+        """Compute split points and populate cell->row-ids buckets.
+
+        Quantile splits (DuckDB's quantile_cont) are what make this balanced:
+        a naive equal-width grid would be empty in sparse regions and oversized
+        in dense ones, defeating the point of the index.
+        """
         self.dimensions = dims
         self.scales = []
 
@@ -40,16 +51,15 @@ class GridFile:
                     SELECT quantile_cont("{dim}", {q}) FROM "{table_name}"
                 """).fetchone()[0]
                 q_values.append(float(val))
-            # Remove duplicates and sort
+            # Dedupe: columns with low cardinality can yield identical quantile values.
             q_values = sorted(set(q_values))
             self.scales.append(q_values)
 
         os.makedirs(self.bucket_dir, exist_ok=True)
 
-        # Assign each row to a cell and store row IDs per cell
         self._row_id_buckets = {}
 
-        # Build cell assignment query
+        # Assign every row to a cell via a single CASE-based SQL pass.
         select_parts = ['rowid AS __rid']
         for i, dim in enumerate(dims):
             scale = self.scales[i]
@@ -74,18 +84,17 @@ class GridFile:
                 self._row_id_buckets[cell] = []
             self._row_id_buckets[cell].append(rid)
 
-        # Convert lists to numpy arrays
+        # Swap Python lists for numpy arrays so range_query has less to copy.
         for cell in self._row_id_buckets:
             self._row_id_buckets[cell] = np.array(
                 self._row_id_buckets[cell], dtype=np.int64
             )
 
     def _cell_range(self, dim_idx: int, low: float, high: float) -> list[int]:
-        """Return which cell indices along a dimension overlap [low, high]."""
+        """Cell indices along one dimension whose value range overlaps [low, high]."""
         scale = self.scales[dim_idx]
         n_cells = len(scale) + 1
 
-        # Find first cell that could contain values >= low
         start = 0
         for i, threshold in enumerate(scale):
             if low < threshold:
@@ -93,7 +102,6 @@ class GridFile:
                 break
             start = i + 1
 
-        # Find last cell that could contain values <= high
         end = n_cells - 1
         for i, threshold in enumerate(scale):
             if high < threshold:
@@ -103,21 +111,22 @@ class GridFile:
         return list(range(start, end + 1))
 
     def range_query(self, bounds: dict[str, tuple[float, float]]) -> list[int]:
-        """Query by ranges. bounds = {"col": (low, high), ...}."""
+        """Return every row id whose dimension values all fall inside their bound.
+
+        bounds is a partial map -- unspecified dimensions match every cell along
+        that axis. The result is the union of row-ids across all selected buckets.
+        """
         if not self._row_id_buckets:
             return []
 
-        # Get cell ranges per dimension
         cell_ranges: list[list[int]] = []
         for i, dim in enumerate(self.dimensions):
             if dim in bounds:
                 low, high = bounds[dim]
                 cell_ranges.append(self._cell_range(i, low, high))
             else:
-                # No filter on this dim — all cells
                 cell_ranges.append(list(range(len(self.scales[i]) + 1)))
 
-        # Cartesian product of cell ranges
         from itertools import product
 
         result: list[int] = []

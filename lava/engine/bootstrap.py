@@ -1,4 +1,6 @@
-"""One-call dataset bootstrap — ingest, register, catalog, stats."""
+"""Single entry point for ingesting a dataset. Runs profile -> Parquet
+conversion -> view registration -> catalog insert -> stats extraction in order,
+and returns everything the UI needs to start answering queries."""
 
 import os
 

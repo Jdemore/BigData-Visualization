@@ -1,4 +1,5 @@
-"""Short-term conversation history for context-aware follow-up queries."""
+"""Sliding window of recent (query, spec) pairs so follow-ups like "now make it
+monthly" can build on the previous chart instead of starting from scratch."""
 
 from collections import deque
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ def clear() -> None:
 
 
 def build_history_block() -> str:
-    """Format recent history as a compact prompt fragment. Empty string if none."""
+    """Compact prompt fragment summarizing recent turns. Empty when no history."""
     if not _history:
         return ""
 
@@ -44,7 +45,7 @@ def build_history_block() -> str:
         bucket = spec.x_axis.get("time_bucket") or "none"
         color = spec.color_by or "none"
         lines.append(
-            f"  [{i}] \"{entry.user_query}\" → "
+            f"  [{i}] \"{entry.user_query}\" -> "
             f"{spec.chart_type}, x={x}, y={y}({agg}), "
             f"bucket={bucket}, color_by={color}"
         )

@@ -1,4 +1,9 @@
-"""LAVA — LLM-Assisted Visual Analytics. Entry point."""
+"""CLI entry point.
+
+Parses --data and --port, ensures an OPENAI_API_KEY is set (prompting once
+and persisting to .env if not), bootstraps the dataset, warms the LLM, and
+hands off to the Dash app. Run with: `python main.py --data <path>`.
+"""
 
 import argparse
 import os
@@ -17,7 +22,8 @@ ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
 
 
 def _ensure_api_key() -> None:
-    """Prompt user for OpenAI API key if not set, and save to .env."""
+    """First-run key setup. Writes OPENAI_API_KEY to .env so subsequent launches
+    pick it up automatically via load_dotenv()."""
     if os.environ.get("OPENAI_API_KEY"):
         return
 
@@ -29,7 +35,6 @@ def _ensure_api_key() -> None:
         print("No key provided. The app will start but queries will fail.\n")
         return
 
-    # Save to .env
     os.environ["OPENAI_API_KEY"] = key
     with open(ENV_FILE, "w", encoding="utf-8") as f:
         f.write(f"OPENAI_API_KEY={key}\n")
@@ -37,11 +42,11 @@ def _ensure_api_key() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="LAVA — LLM-Assisted Visual Analytics")
+    parser = argparse.ArgumentParser(description="LAVA -- LLM-Assisted Visual Analytics")
     parser.add_argument(
         "--data",
         default=os.path.join("sample_data", "sales.csv"),
-        help="Path to CSV or Parquet file to visualize",
+        help="Path to the source CSV, JSON, or Parquet file.",
     )
     parser.add_argument("--port", type=int, default=8050, help="Dash server port")
     args = parser.parse_args()
@@ -52,17 +57,16 @@ def main() -> None:
 
     _ensure_api_key()
 
-    # Bootstrap
     con = get_connection()
     table_name, column_stats = bootstrap(con, args.data)
     print(f"Loaded dataset '{table_name}' with {len(column_stats)} columns")
 
-    # Warm the LLM
+    # Prime the OpenAI connection before the first user query arrives so the
+    # initial chart doesn't pay the TLS handshake cost.
     if os.environ.get("OPENAI_API_KEY"):
         print("Warming GPT model...")
         warm_model()
 
-    # Start Dash
     init_app(con, table_name, column_stats)
     print(f"Starting LAVA at http://127.0.0.1:{args.port}")
     app.run(debug=False, host="127.0.0.1", port=args.port)

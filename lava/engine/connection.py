@@ -1,4 +1,6 @@
-"""DuckDB connection management — singleton, tuned for LAVA workloads."""
+"""Process-wide DuckDB connection. Tuned for analytical workloads: thread count
+follows CPU count, memory limit is set to 70% of system RAM with spillover to
+a temp directory so large queries don't OOM."""
 
 import os
 import tempfile

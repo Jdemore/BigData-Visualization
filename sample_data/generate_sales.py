@@ -1,4 +1,8 @@
-"""Generate deterministic sales CSV for testing."""
+"""Synthesize the sales.csv fixture used by the default --data arg.
+
+50K rows of transactional retail data across 5 regions and 5 product
+categories, spanning 2 years. Seeded so regeneration is deterministic:
+identical seed produces identical output, which matters for test stability."""
 
 import csv
 import os
@@ -17,10 +21,10 @@ PRODUCTS = {
 
 
 def generate(output_path: str, n_rows: int = 50_000, seed: int = 42) -> str:
-    """Generate a deterministic sales CSV. Returns the output path."""
+    """Write a seeded sales CSV to output_path and return it."""
     random.seed(seed)
     start_date = date(2023, 1, 1)
-    date_range = 730  # 2 years
+    date_range = 730  # two-year span, in days
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
