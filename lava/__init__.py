@@ -1,1 +1,1 @@
-"""LAVA — LLM-Assisted Visual Analytics."""
+"""LAVA: natural-language querying and visualization over Parquet via DuckDB."""

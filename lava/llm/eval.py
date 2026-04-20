@@ -1,4 +1,8 @@
-"""Evaluation metrics for LLM pipeline accuracy."""
+"""Metrics for judging the LLM pipeline's output quality.
+
+This is the evaluation harness referenced in section 7.5 of the report. It has
+no committed labeled dataset yet; the functions are here ready to be driven
+from a curated benchmark (see Future Work)."""
 
 from dataclasses import dataclass
 
@@ -7,7 +11,7 @@ from lava.llm.schema import VizSpec
 
 @dataclass
 class EvalResult:
-    """Aggregate evaluation metrics."""
+    """Aggregate metrics across a benchmark run."""
 
     parse_success_rate: float
     schema_compliance_rate: float
@@ -17,7 +21,8 @@ class EvalResult:
 
 
 def calc_parse_success_rate(results: list[dict]) -> float:
-    """Percentage of queries that produce valid JSON on the first attempt."""
+    """Fraction of queries where the FIRST LLM attempt returned valid JSON.
+    Retries count as failures here -- we want to measure cold accuracy."""
     if not results:
         return 0.0
     successes = sum(1 for r in results if r["success"] and r["attempts"] == 1)
@@ -25,7 +30,7 @@ def calc_parse_success_rate(results: list[dict]) -> float:
 
 
 def calc_intent_accuracy(predictions: list[str], labels: list[str]) -> float:
-    """Percentage of correct intent classifications."""
+    """Classification accuracy for the intent field against human-labelled truth."""
     if not labels:
         return 0.0
     correct = sum(1 for pred, label in zip(predictions, labels) if pred == label)
@@ -33,7 +38,8 @@ def calc_intent_accuracy(predictions: list[str], labels: list[str]) -> float:
 
 
 def score_chart_choice(spec: VizSpec, data_profile: dict) -> float:
-    """Rule-based scorer for chart type appropriateness."""
+    """Rule-based chart-fit score in [0, 1]. Does the chart type suit the data shape?
+    Intentionally coarse -- tuned from common patterns, not learned."""
     chart = spec.chart_suggestion
     n_groups = data_profile.get("n_unique_groups", 1)
     has_time = data_profile.get("has_datetime_column", False)

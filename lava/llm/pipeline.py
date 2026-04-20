@@ -1,4 +1,12 @@
-"""Two-step NL to VizSpec pipeline: refine → generate, with full logging."""
+"""Two LLM calls per user question: step 1 refines the NL query into an
+unambiguous analytical statement; step 2 turns that into a VizSpec JSON.
+
+Splitting the work this way is deliberate -- giving the model ONE job per call
+gets noticeably better results than asking it to do both at once, and it keeps
+the two prompts short enough to fit well inside the model's attention span.
+Every run is logged to pipeline_runs.jsonl so we can audit bad outputs after
+the fact without re-running the query.
+"""
 
 import hashlib
 import json
@@ -6,6 +14,7 @@ import time
 
 from lava.llm.client import query_llm
 from lava.llm.error_log import log_error, log_run
+from lava.llm.history import add_entry, build_history_block
 from lava.llm.parser import parse_llm_response
 from lava.llm.prompt import (
     REFINE_SYSTEM,
@@ -38,9 +47,16 @@ def _get_schema(column_stats: dict[str, dict]) -> dict[str, str]:
 
 
 def _refine_query(user_query: str, context: str) -> tuple[str, str, str | None, dict | None]:
-    """Step 1: Refine raw NL into a precise analytical query.
-    Returns (refined_query, notes, chart_type_hint, raw_response)."""
-    prompt = build_refine_prompt(user_query, context)
+    """Step 1. Returns (refined_query, notes, chart_type_hint, raw_response).
+
+    The refined_query is a single precise analytical statement referencing real
+    column names -- much easier for step 2 to translate than a colloquial prompt.
+    Notes and chart_type_hint are passed forward and eventually shown as warnings
+    or override the default chart choice.
+    """
+    history_block = build_history_block()
+    full_context = f"{context}\n\n{history_block}" if history_block else context
+    prompt = build_refine_prompt(user_query, full_context)
     try:
         data = query_llm(prompt, system=REFINE_SYSTEM)
         refined = data.get("refined_query", user_query)
@@ -58,8 +74,12 @@ def _generate_vizspec(
     user_query: str, refined_query: str, context: str, notes: str,
     schema: dict, chart_type_hint: str | None = None,
 ) -> tuple[VizSpec, dict | None]:
-    """Step 2: Convert refined query into VizSpec.
-    Returns (spec, raw_llm_response)."""
+    """Step 2. Returns (spec, raw_llm_response).
+
+    Retries once with the parse error echoed back -- small prompt fix often
+    turns a malformed JSON into a valid one on attempt two. If both attempts
+    fail, falls back to a plain table preview so the user still sees something.
+    """
     prompt = build_vizspec_prompt(refined_query, context, notes, chart_type_hint)
     raw_response = None
 
@@ -101,26 +121,35 @@ def nl_to_vizspec(
     column_stats: dict[str, dict],
     use_cache: bool = True,
 ) -> VizSpec:
-    """Full two-step pipeline: NL → refine → VizSpec, with logging."""
+    """Main entry point: natural language in, VizSpec out.
+
+    When there's an active conversation history ("now make it monthly"), we
+    skip the cache because a cached spec from the first query would ignore the
+    follow-up's context.
+    """
+    from lava.llm.history import get_history
+    has_history = len(get_history()) > 0
+
     ck = _cache_key(user_query)
-    if use_cache and ck in _vizspec_cache:
+    if use_cache and not has_history and ck in _vizspec_cache:
         return _vizspec_cache[ck]
 
     t0 = time.perf_counter()
     context = _get_context(column_stats)
     schema = _get_schema(column_stats)
 
-    # Step 1: Refine
     refined_query, notes, chart_hint, refine_raw = _refine_query(user_query, context)
 
-    # Step 2: Generate
     spec, vizspec_raw = _generate_vizspec(
         user_query, refined_query, context, notes, schema, chart_hint
     )
 
+    add_entry(user_query, refined_query, spec)
+
     duration_ms = (time.perf_counter() - t0) * 1000
 
-    # Log the full run
+    # Log the spec alongside the SQL it generates so later audits don't need
+    # to rerun the pipeline -- useful when diagnosing a bad chart weeks later.
     try:
         from lava.llm.sql_gen import vizspec_to_sql
         sql_preview = vizspec_to_sql(spec, "__table__")

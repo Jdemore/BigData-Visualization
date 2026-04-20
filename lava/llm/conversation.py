@@ -1,4 +1,6 @@
-"""Multi-turn conversation context for follow-up queries."""
+"""Object-oriented multi-turn context helper. Mostly superseded by the
+module-level history in history.py, but kept for tests and any future callers
+that need more than one conversation at a time."""
 
 from collections import deque
 
@@ -6,7 +8,7 @@ from lava.llm.schema import VizSpec
 
 
 class ConversationContext:
-    """Maintains last N query/spec pairs for follow-up resolution."""
+    """Bounded deque of the last N (query, spec) pairs."""
 
     def __init__(self, max_turns: int = 3) -> None:
         self._history: deque[tuple[str, VizSpec]] = deque(maxlen=max_turns)

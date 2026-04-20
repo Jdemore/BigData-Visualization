@@ -1,4 +1,5 @@
-"""OpenAI client — singleton, structured JSON output."""
+"""Thin wrapper over the OpenAI chat completions API. Centralizes the model id,
+temperature, and JSON-mode response format so callers never set them ad-hoc."""
 
 import json
 import os
@@ -11,7 +12,8 @@ _client: openai.OpenAI | None = None
 
 
 def get_client() -> openai.OpenAI:
-    """Reuse a single client instance. Reads OPENAI_API_KEY from env."""
+    """Lazy singleton. Keeping one HTTP client across requests reuses the
+    underlying connection pool instead of reopening TLS on every LLM call."""
     global _client
     if _client is None:
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -24,7 +26,8 @@ def get_client() -> openai.OpenAI:
 
 
 def query_llm(prompt: str, system: str) -> dict:
-    """Call GPT with structured JSON output. Returns parsed dict."""
+    """One-shot request. temperature=0.1 keeps the output reproducible enough
+    that identical prompts nearly always yield identical VizSpecs."""
     client = get_client()
     response = client.chat.completions.create(
         model=MODEL,
@@ -43,7 +46,8 @@ def query_llm(prompt: str, system: str) -> dict:
 
 
 def warm_model() -> None:
-    """Send a throwaway request at startup to confirm the API key works."""
+    """Validate API key and prime the connection at startup so the first real
+    user query doesn't pay the cold-start TLS handshake."""
     try:
         query_llm("Respond with: {}", system="Return valid JSON only.")
         print(f"  Using model: {MODEL}")

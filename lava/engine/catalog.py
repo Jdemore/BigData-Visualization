@@ -1,4 +1,5 @@
-"""Metadata catalog — track every ingested dataset."""
+"""__lava_catalog table: one row per ingested dataset, tracking name, source
+path, columns, row count, and whether indexes have been built."""
 
 import json
 

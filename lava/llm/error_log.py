@@ -1,7 +1,10 @@
-"""Persistent error logging — stores every pipeline run for debugging and self-healing.
+"""Append-only JSONL logs for every pipeline run.
 
-Log files are NOT gitignored so Claude can read them to fix recurring issues.
-"""
+pipeline_runs.jsonl holds one record per query (success or failure) with the
+raw LLM response, parsed VizSpec, and generated SQL. pipeline_errors.jsonl
+holds a stack-trace per exception. Logs are NOT gitignored on purpose: keeping
+them in the repo makes it easy to diff behaviour between runs and to feed bad
+outputs back into prompt tuning."""
 
 import json
 import os
@@ -18,7 +21,7 @@ def _ensure_dir() -> None:
 
 
 def _safe_serialize(obj) -> str:
-    """JSON serialize with fallback for non-serializable types."""
+    """Serialize with default=str so datetimes, exceptions, etc. don't crash the logger."""
     try:
         return json.dumps(obj, default=str, ensure_ascii=False)
     except Exception:
@@ -37,7 +40,7 @@ def log_run(
     error: str | None = None,
     duration_ms: float | None = None,
 ) -> None:
-    """Log a complete pipeline run (success or failure)."""
+    """Append one pipeline-run record. Called for every query regardless of outcome."""
     _ensure_dir()
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -62,7 +65,7 @@ def log_error(
     error: Exception,
     context: dict | None = None,
 ) -> None:
-    """Log a pipeline error with full traceback and context."""
+    """Append one error record with stage, exception type, traceback, and caller context."""
     _ensure_dir()
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -78,7 +81,7 @@ def log_error(
 
 
 def get_recent_errors(n: int = 20) -> list[dict]:
-    """Read the last N error log entries."""
+    """Last N error entries as parsed dicts. Reads the whole file; fine for JSONL of this size."""
     if not os.path.exists(ERROR_LOG):
         return []
     entries: list[dict] = []
@@ -94,7 +97,7 @@ def get_recent_errors(n: int = 20) -> list[dict]:
 
 
 def get_error_patterns() -> dict[str, int]:
-    """Summarize error patterns: {error_type+stage: count}."""
+    """Frequency table keyed on 'stage:error_type'. Useful for spotting recurring failures."""
     errors = get_recent_errors(100)
     patterns: dict[str, int] = {}
     for e in errors:

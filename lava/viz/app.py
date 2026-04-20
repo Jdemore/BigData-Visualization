@@ -1,21 +1,35 @@
-"""Dash application — the web interface for LAVA."""
+"""Dash front-end. Single-page layout with a file upload zone, query box,
+chart-type override, a Plotly graph, and a SQL/timing footer.
 
+Module-level state holds the active DuckDB connection, table name, and column
+stats. This is intentionally simple: LAVA is single-user by design and all the
+state fits naturally in a module. Moving to multi-user would require a
+per-session cache (dcc.Store, Redis, or similar)."""
+
+import base64
+import os
+import re
 import time
 
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, clientside_callback, dcc, html
 
+from lava.engine.bootstrap import bootstrap
 from lava.engine.query import execute_query
 from lava.llm.pipeline import nl_to_vizspec
 from lava.llm.schema import VALID_CHARTS
 from lava.llm.sql_gen import vizspec_to_sql
 from lava.viz.renderer import render
 
-# Module-level state set by init_app()
+# Active-dataset handles. Replaced whenever init_app() runs or a user uploads.
 _con = None
 _table_name = None
 _column_stats = None
+
+UPLOAD_DIR = "uploads"
+MAX_UPLOAD_MB = 200
+ALLOWED_EXT = (".csv", ".json", ".ndjson", ".jsonl", ".parquet")
 
 CHART_OPTIONS = [
     {"label": "Auto (LLM decides)", "value": "auto"},
@@ -48,8 +62,40 @@ app.layout = dbc.Container(
     [
         # Header
         html.Div(
-            html.H4("LAVA", className="text-white mb-0"),
-            className="bg-primary px-3 py-2 rounded-top mt-3",
+            [
+                html.H4("LAVA", className="text-white mb-0 flex-grow-1"),
+                html.Span(id="active-dataset", className="text-white-50 small"),
+            ],
+            className="bg-primary px-3 py-2 rounded-top mt-3 d-flex align-items-center",
+        ),
+        # Upload row
+        html.Div(
+            [
+                dcc.Upload(
+                    id="file-upload",
+                    children=html.Div([
+                        "Drag & drop or ",
+                        html.A("select a file", className="text-primary"),
+                        html.Span(
+                            "  (CSV, JSON, Parquet -- up to 200 MB)",
+                            className="text-muted small ms-2",
+                        ),
+                    ]),
+                    style={
+                        "width": "100%", "padding": "12px",
+                        "borderWidth": "1px", "borderStyle": "dashed",
+                        "borderRadius": "6px", "textAlign": "center",
+                        "cursor": "pointer",
+                    },
+                    multiple=False,
+                    max_size=MAX_UPLOAD_MB * 1024 * 1024,
+                ),
+                dcc.Loading(
+                    html.Div(id="upload-status", className="small mt-1"),
+                    type="dot",
+                ),
+            ],
+            className="mt-3 mb-2",
         ),
         # Input row: query + chart selector + button
         html.Div(
@@ -110,7 +156,7 @@ app.layout = dbc.Container(
     className="px-4",
 )
 
-# Escape key clears the input
+# A tiny JS hook so Escape inside the query box clears it without a round trip.
 clientside_callback(
     """
     function(id) {
@@ -141,6 +187,7 @@ clientside_callback(
     prevent_initial_call=True,
 )
 def handle_query(n_clicks: int, n_submit: int, query_text: str, chart_override: str):
+    """End-to-end: NL -> VizSpec -> SQL -> Plotly figure. Runs on submit or Enter."""
     if not query_text:
         return go.Figure(), "Enter a question above.", "", None
 
@@ -152,7 +199,7 @@ def handle_query(n_clicks: int, n_submit: int, query_text: str, chart_override: 
     try:
         spec = nl_to_vizspec(query_text, _column_stats)
 
-        # Apply chart type override from dropdown
+        # Dropdown can force a specific chart type regardless of the LLM's choice.
         if chart_override and chart_override != "auto" and chart_override in VALID_CHARTS:
             spec.chart_type = chart_override
 
@@ -187,8 +234,75 @@ def handle_query(n_clicks: int, n_submit: int, query_text: str, chart_override: 
 
 
 def init_app(con, table_name: str, column_stats: dict[str, dict]) -> None:
-    """Wire up the app with a dataset. Call before app.run()."""
+    """Install the initial dataset. Main.py calls this once before app.run()."""
     global _con, _table_name, _column_stats
     _con = con
     _table_name = table_name
     _column_stats = column_stats
+    app.layout.children[0].children[1].children = f"dataset: {table_name}"
+
+
+def _safe_name(filename: str) -> str:
+    """Strip filesystem-hostile characters from an uploaded filename so we can
+    safely write it into UPLOAD_DIR without path-traversal risk."""
+    base = os.path.basename(filename)
+    return re.sub(r"[^A-Za-z0-9._-]", "_", base)
+
+
+@callback(
+    Output("upload-status", "children"),
+    Output("active-dataset", "children"),
+    Input("file-upload", "contents"),
+    State("file-upload", "filename"),
+    prevent_initial_call=True,
+)
+def handle_upload(contents: str, filename: str):
+    """Decode the uploaded file, persist it to UPLOAD_DIR, and swap it in as
+    the active dataset. The dcc.Upload component already enforces MAX_UPLOAD_MB
+    client-side; we still validate the extension server-side before writing."""
+    global _table_name, _column_stats
+
+    if not contents or not filename:
+        return "", f"dataset: {_table_name or 'none'}"
+
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXT:
+        return (
+            html.Span(
+                f"Unsupported file type: {ext}. Use CSV, JSON, or Parquet.",
+                className="text-danger",
+            ),
+            f"dataset: {_table_name or 'none'}",
+        )
+
+    try:
+        _, b64 = contents.split(",", 1)
+        raw = base64.b64decode(b64)
+
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        dest = os.path.join(UPLOAD_DIR, _safe_name(filename))
+        with open(dest, "wb") as f:
+            f.write(raw)
+
+        t0 = time.perf_counter()
+        new_table, new_stats = bootstrap(_con, dest)
+        elapsed = time.perf_counter() - t0
+
+        _table_name = new_table
+        _column_stats = new_stats
+
+        size_mb = len(raw) / (1024 * 1024)
+        msg = html.Span(
+            f"Loaded '{new_table}' -- {len(new_stats)} columns, "
+            f"{size_mb:.1f} MB, bootstrap {elapsed:.2f}s",
+            className="text-success",
+        )
+        return msg, f"dataset: {new_table}"
+
+    except Exception as e:
+        from lava.llm.error_log import log_error
+        log_error(filename, "upload_callback", e, {"filename": filename})
+        return (
+            html.Span(f"Upload failed: {e}", className="text-danger"),
+            f"dataset: {_table_name or 'none'}",
+        )

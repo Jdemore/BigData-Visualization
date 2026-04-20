@@ -1,4 +1,10 @@
-"""Datashader rendering for scatter/heatmap above 100K rows."""
+"""Raster-based rendering for datasets too large for per-point SVG or WebGL.
+
+Datashader bins points into a pixel grid server-side, producing a PNG density
+map. We then embed that PNG inside an empty Plotly figure so the user still
+gets panning, zooming, and hover coordinates. Used for scatter/heatmap once
+row count passes 100K -- Plotly itself chokes well before that on SVG and
+starts dropping frames on WebGL."""
 
 import base64
 from io import BytesIO
@@ -12,7 +18,7 @@ from lava.llm.schema import VizSpec
 
 
 def render_datashader(spec: VizSpec, data_result: DataResult) -> go.Figure:
-    """Server-side rasterize, embed in Plotly for interactive axes."""
+    """Rasterize the point cloud and return a Plotly figure with the image layered in."""
     cols = spec.columns or list(data_result.arrow_table.schema.names)
     x_col = cols[0]
     y_col = cols[1] if len(cols) > 1 else cols[0]

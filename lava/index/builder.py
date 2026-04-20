@@ -1,4 +1,5 @@
-"""Index builders — DuckDB sort/extract then delegate to index classes."""
+"""Wire DuckDB's sort into the B+-tree bulk-load path, and drive GridFile.build
+for 2-D indexes. Kept separate from the index classes so those stay DB-agnostic."""
 
 import os
 
